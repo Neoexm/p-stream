@@ -5,6 +5,7 @@ import {
 
 import { isAllowedExtensionVersion } from "@/backend/extension/compatibility";
 import { ExtensionMakeRequestResponse } from "@/backend/extension/plasmo";
+import { conf } from "@/setup/config";
 
 export const RULE_IDS = {
   PREPARE_STREAM: 1,
@@ -28,24 +29,63 @@ async function sendMessage<MessageKey extends keyof MessagesMetadata>(
   timeout: number = -1,
 ) {
   await isExtensionReady;
-  return new Promise<MessagesMetadata[MessageKey]["res"] | null>((resolve) => {
-    if (timeout >= 0) setTimeout(() => resolve(null), timeout);
-    sendToBackgroundViaRelay<
-      MessagesMetadata[MessageKey]["req"],
-      MessagesMetadata[MessageKey]["res"]
-    >({
-      name: message,
-      body: payload,
-    })
-      .then((res) => {
+  return new Promise<MessagesMetadata[MessageKey]["res"] | null>(
+    async (resolve) => {
+      if (timeout >= 0) setTimeout(() => resolve(null), timeout);
+
+      try {
+        const res = await sendToBackgroundViaRelay<
+          MessagesMetadata[MessageKey]["req"],
+          MessagesMetadata[MessageKey]["res"]
+        >({
+          name: message,
+          body: payload,
+        });
         activeExtension = true;
         resolve(res);
-      })
-      .catch(() => {
+        return;
+      } catch (e) {
         activeExtension = false;
+      }
+
+      // Extension not available — try backend fallback if configured
+      const backend = conf().BACKEND_URL;
+      if (!backend) {
         resolve(null);
-      });
-  });
+        return;
+      }
+
+      try {
+        const url = `${backend.replace(/\/$/, "")}/api/extension/${String(
+          message,
+        )}`;
+
+        // For simple 'hello' allow GET
+        const method = String(message) === "hello" ? "GET" : "POST";
+
+        const fetchOptions: RequestInit = {
+          method,
+          headers: { "Content-Type": "application/json" },
+        };
+
+        if (method === "POST") fetchOptions.body = JSON.stringify(payload ?? {});
+
+        const r = await fetch(url, fetchOptions);
+        if (!r.ok) {
+          resolve(null);
+          return;
+        }
+        const json = await r.json();
+        // Assume backend returns the same shape as the extension message response
+        resolve(json as MessagesMetadata[MessageKey]["res"]);
+        return;
+      } catch (err) {
+        // backend fallback failed
+        resolve(null);
+        return;
+      }
+    },
+  );
 }
 
 export async function sendExtensionRequest<T>(
