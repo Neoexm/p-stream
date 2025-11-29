@@ -29,10 +29,11 @@ async function sendMessage<MessageKey extends keyof MessagesMetadata>(
   timeout: number = -1,
 ) {
   await isExtensionReady;
-  return new Promise<MessagesMetadata[MessageKey]["res"] | null>(
-    async (resolve) => {
-      if (timeout >= 0) setTimeout(() => resolve(null), timeout);
+  return new Promise<MessagesMetadata[MessageKey]["res"] | null>((resolve) => {
+    if (timeout >= 0) setTimeout(() => resolve(null), timeout);
 
+    (async () => {
+      let handledByExtension = false;
       try {
         const res = await sendToBackgroundViaRelay<
           MessagesMetadata[MessageKey]["req"],
@@ -42,11 +43,13 @@ async function sendMessage<MessageKey extends keyof MessagesMetadata>(
           body: payload,
         });
         activeExtension = true;
+        handledByExtension = true;
         resolve(res);
-        return;
       } catch (e) {
         activeExtension = false;
       }
+
+      if (handledByExtension) return;
 
       // Extension not available — try backend fallback if configured
       const backend = conf().BACKEND_URL;
@@ -56,11 +59,8 @@ async function sendMessage<MessageKey extends keyof MessagesMetadata>(
       }
 
       try {
-        const url = `${backend.replace(/\/$/, "")}/api/extension/${String(
-          message,
-        )}`;
+        const url = `${backend.replace(/\/$/, "")}/api/extension/${String(message)}`;
 
-        // For simple 'hello' allow GET
         const method = String(message) === "hello" ? "GET" : "POST";
 
         const fetchOptions: RequestInit = {
@@ -68,7 +68,9 @@ async function sendMessage<MessageKey extends keyof MessagesMetadata>(
           headers: { "Content-Type": "application/json" },
         };
 
-        if (method === "POST") fetchOptions.body = JSON.stringify(payload ?? {});
+        if (method === "POST") {
+          fetchOptions.body = JSON.stringify(payload ?? {});
+        }
 
         const r = await fetch(url, fetchOptions);
         if (!r.ok) {
@@ -76,16 +78,12 @@ async function sendMessage<MessageKey extends keyof MessagesMetadata>(
           return;
         }
         const json = await r.json();
-        // Assume backend returns the same shape as the extension message response
         resolve(json as MessagesMetadata[MessageKey]["res"]);
-        return;
       } catch (err) {
-        // backend fallback failed
         resolve(null);
-        return;
       }
-    },
-  );
+    })();
+  });
 }
 
 export async function sendExtensionRequest<T>(
